@@ -22,12 +22,12 @@ from eventyay.agenda.views.utils import (
     WipAgendaPreviewPageMixin,
     build_google_calendar_url,
     build_speaker_schedule_json,
-    build_speakers_list_schedule_json,
     is_public_speakers_empty,
     is_public_speakers_list_empty,
     redirect_to_presale_with_warning,
     redirect_when_public_speakers_unavailable,
     speaker_profile_display_order,
+    build_speaker_cards,
 )
 from eventyay.base.models import SpeakerProfile, TalkQuestionTarget, User
 from eventyay.common.text.path import safe_filename
@@ -50,7 +50,21 @@ class SpeakerList(EventPermissionRequired, Filterable, ListView):
     context_object_name = 'speakers'
     template_name = 'agenda/speakers.html'
     permission_required = 'base.list_schedule'
-    default_filters = ('user__fullname__icontains',)
+    default_filters = (
+        'user__fullname__icontains',
+        'biography__icontains',
+        'user__submissions__title__icontains',
+    )
+    paginate_by = 48
+
+    def render_to_response(self, context, **response_kwargs):
+        if self.request.GET.get('format') == 'json' or 'application/json' in self.request.headers.get('Accept', ''):
+            speakers = build_speaker_cards(context['object_list'], self.request.event)
+            return JsonResponse({
+                'results': speakers,
+                'next': context['page_obj'].has_next() if context.get('page_obj') else False
+            })
+        return super().render_to_response(context, **response_kwargs)
 
     def has_permission(self):
         return can_list_released_schedule_speakers(self.request.user, self.request.event)
@@ -65,12 +79,18 @@ class SpeakerList(EventPermissionRequired, Filterable, ListView):
     def get_queryset(self):
         event = self.request.event
         qs = SpeakerProfile.objects.filter(user__in=event.speakers, event=event)
-        qs = qs.select_related('user', 'event', 'event__organizer').order_by(*speaker_profile_display_order())
-        return self.filter_queryset(qs)
+        qs = qs.select_related('user', 'event', 'event__organizer')
+        sort = self.request.GET.get('sort')
+        if sort == 'a-z':
+            qs = qs.order_by('user__fullname', 'pk')
+        elif sort == 'z-a':
+            qs = qs.order_by('-user__fullname', 'pk')
+        else:
+            qs = qs.order_by('-is_featured', *speaker_profile_display_order())
+        # Searching session titles joins the speakers M2M, which can duplicate rows.
+        return self.filter_queryset(qs).distinct()
 
-    @context
-    def schedule_json(self):
-        return build_speakers_list_schedule_json(self.request)
+
 
     def get_context_data(self, **kwargs):
         return super().get_context_data(**kwargs)

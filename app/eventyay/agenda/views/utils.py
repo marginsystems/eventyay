@@ -20,7 +20,7 @@ from django_context_decorator import context
 from django_scopes import scope
 from i18nfield.utils import I18nJSONEncoder
 
-from eventyay.base.models import SpeakerProfile, TalkSlot, User
+from eventyay.base.models import SpeakerProfile, SubmissionStates, TalkSlot, User
 from eventyay.base.models.submission import SubmissionFavourite
 from eventyay.common.exporter import BaseExporter
 from eventyay.common.signals import register_data_exporters, register_my_data_exporters
@@ -108,6 +108,78 @@ def speaker_profile_display_order():
         'user__fullname',
         'pk',
     )
+
+
+def build_speaker_card_avatar(user, event):
+    """Return responsive avatar variants for a speaker card, or ``None``.
+
+    Uploaded avatars expose tiny/list/default thumbnails so the browser can pick
+    an appropriately sized image via ``srcset``. External avatars fall back to a
+    single URL.
+    """
+    if user.avatar and user.avatar != 'False':
+        tiny = user.get_avatar_url(event=event, thumbnail='tiny')
+        default = user.get_avatar_url(event=event, thumbnail='default')
+        return default or tiny
+    external = user.get_avatar_url(event=event)
+    if not external:
+        return None
+    return external
+
+
+def build_speaker_cards(profiles, event):
+    """Build lightweight per-speaker data for the public speakers overview.
+
+    Only the fields shown on a speaker card are included - no biographies,
+    session descriptions, or unused avatar variants - so the overview payload
+    does not grow with the full schedule.
+    """
+    include_avatar, _ = speaker_public_field_flags(event)
+    cards = []
+    
+    # We need to compute sessions for each speaker.
+    # We can fetch talks from the schedule.
+    schedule = event.current_schedule
+    
+    talks = []
+    if schedule:
+        talks = list(
+            schedule.talks.select_related('submission', 'room', 'submission__track')
+            .prefetch_related('submission__speakers')
+            .filter(
+                room__isnull=False,
+                room__deleted=False,
+                room__is_unscheduled=False,
+                start__isnull=False,
+                is_visible=True,
+                submission__isnull=False,
+            )
+            .exclude(submission__state=SubmissionStates.DELETED)
+        )
+    
+    for profile in profiles:
+        user = profile.user
+        
+        # find sessions for this speaker
+        speaker_sessions = []
+        for talk in talks:
+            if talk.submission and user in talk.submission.speakers.all():
+                speaker_sessions.append({
+                    'id': talk.submission.code,
+                    'title': talk.submission.title,
+                })
+        
+        card = {
+            'code': user.code,
+            'name': user.get_display_name(),
+            'is_featured': bool(profile.is_featured),
+            'avatar': None,
+            'sessions': speaker_sessions,
+        }
+        if include_avatar and user.has_avatar:
+            card['avatar'] = build_speaker_card_avatar(user, event)
+        cards.append(card)
+    return cards
 
 
 def get_public_featured_speaker_profiles(event):
